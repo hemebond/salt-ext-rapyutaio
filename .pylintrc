@@ -64,7 +64,12 @@ disable=R,
   E812,
   wrong-import-position,
   wrong-import-order,
-  un-indexed-curly-braces-error
+  un-indexed-curly-braces-error,
+  indentation-contains-tabs,
+  mixed-indentation,
+  too-many-blank-lines,
+  expected-2-blank-lines-found-0,
+  indentation-contains-mixed-spaces-and-tabs
 
 # Disabled:
 # R* [refactoring suggestions & reports]
