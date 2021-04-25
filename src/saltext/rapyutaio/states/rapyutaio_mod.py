@@ -156,7 +156,7 @@ def package_present(name,
                 return ret
 
     if contents is not None:
-        new_manifest = __salt__['rapyutaio.deep_merge'](new_manifest, contents)
+        new_manifest = __salt__['rapyutaio._deep_merge'](new_manifest, contents)
 
     if new_manifest == {}:
         ret['comment'] = "package_present requires either 'source' or 'contents'"

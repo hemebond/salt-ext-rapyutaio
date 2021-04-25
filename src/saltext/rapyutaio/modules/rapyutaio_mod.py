@@ -4,13 +4,12 @@ Salt execution module
 import logging
 from enum import Enum
 import copy
-from urllib.parse import urlencode
+from urllib.parse import urlencode as _urlencode
 from datetime import datetime
 from time import sleep
 
 from salt.exceptions import CommandExecutionError, SaltInvocationError
 from collections.abc import Mapping
-from salt.matchers.compound_match import match as salt_compound_match
 from salt.exceptions import CommandExecutionError, InvalidConfigError
 from salt.ext import six  # pylint: disable=3rd-party-module-not-gated
 import salt.utils.http
@@ -76,7 +75,7 @@ def _error(ret, err_msg):
 
 
 
-def get_config(project_id, auth_token):
+def _get_config(project_id, auth_token):
     """
     If there is no project_id or auth token provided, this
     will attempt to fetch it from the Salt configuration
@@ -91,7 +90,7 @@ def get_config(project_id, auth_token):
 
 
 
-def get_credentials():
+def _get_credentials():
     config = __salt__['config.get']('rapyutaio')
     return (config['username'], config['password'])
 
@@ -146,7 +145,7 @@ def _renew_token():
       username: "first.last@email.com"
       password: "mypassword"
     """
-    username, password = get_credentials()
+    username, password = _get_credentials()
     return get_auth_token(username, password)
 
 
@@ -199,7 +198,7 @@ def _send_request(url, header_dict={}, method="GET", data=None, params=None):
 
 
 
-def api_request(url,
+def _api_request(url,
                 http_method="GET",
                 header_dict={},
                 data=None,
@@ -209,7 +208,7 @@ def api_request(url,
     """
     Wrapper for HTTP requests to IO and handle authentication and tokens
     """
-    log.debug("rapyutaio.api_request() called...")
+    log.debug("rapyutaio._api_request() called...")
     project_id = project_id or __salt__['config.get']("rapyutaio:project_id")
 
     if not project_id:
@@ -263,7 +262,7 @@ def api_request(url,
 
 
 
-def deep_merge(tgt, src):
+def _deep_merge(tgt, src):
     """Deep merge tgt dict with src
     For each k,v in src: if k doesn't exist in tgt, it is deep copied from
     src to tgt. Otherwise, if v is a list, tgt[k] is replaced with
@@ -272,7 +271,7 @@ def deep_merge(tgt, src):
 
     Examples:
     >>> t = {'name': 'Ferry', 'hobbies': ['programming', 'sci-fi']}
-    >>> print deep_merge(t, {'hobbies': ['gaming']})
+    >>> print _deep_merge(t, {'hobbies': ['gaming']})
     {'name': 'Ferry', 'hobbies': ['gaming', 'sci-fi']}
     """
     if isinstance(tgt, Mapping):
@@ -292,7 +291,7 @@ def deep_merge(tgt, src):
 
             if isinstance(tv, Mapping) and isinstance(sv, Mapping):
                 if sk in tgt:
-                    tgt[tk] = deep_merge(tgt[tk], sv)
+                    tgt[tk] = _deep_merge(tgt[tk], sv)
                 else:
                     tgt[tk] = copy.deepcopy(sv)
             elif isinstance(tv, list) and isinstance(sv, list):
@@ -301,7 +300,7 @@ def deep_merge(tgt, src):
                 elif replace_sublists:
                     tgt[tk] = sv
                 else:
-                    tgt[tk] = deep_merge(tv, sv)
+                    tgt[tk] = _deep_merge(tv, sv)
             elif isinstance(tv, set) and isinstance(sv, set):
                 if sk in tgt:
                     tgt[tk].update(sv.copy())
@@ -318,7 +317,7 @@ def deep_merge(tgt, src):
 
             if idx < tgt_len:
                 if isinstance(tgt[idx], (Mapping, list)) and isinstance(src[idx], (Mapping, list)):
-                    tgt[idx] = deep_merge(tgt[idx], src[idx])
+                    tgt[idx] = _deep_merge(tgt[idx], src[idx])
                 else:
                     tgt[idx] = src[idx]
             else:
@@ -327,6 +326,36 @@ def deep_merge(tgt, src):
         return src
 
     return tgt
+
+
+
+def _match(tgt, device):
+    """
+    Matches devices against a compound target string using the
+    device name as the id and device labels as the grains
+    """
+    custom_opts = copy.copy(__opts__)
+
+    custom_opts.update({
+        "id": device['name'],
+        "grains": {
+            "labels": {
+                label['key']: label['value'] for label in device['labels']
+            },
+            "config_variables": {
+                var['key']: var['value'] for var in device['config_variables']
+            },
+            "status": device['status']
+        }
+    })
+
+    matchers = salt.loader.matchers(custom_opts)
+
+    try:
+        return matchers['compound_match.match'](tgt)
+    except Exception as e:
+        log.exception(e)
+        return False
 
 
 
@@ -358,12 +387,12 @@ def get_packages(phase=(),
     params = {
         'phase': phase,
     }
-    url = CATALOG_HOST + "/v2/catalog?%s" % urlencode(params, doseq=True)
+    url = CATALOG_HOST + "/v2/catalog?%s" % _urlencode(params, doseq=True)
     try:
-        response_body = api_request(url=url,
-                                    http_method="GET",
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="GET",
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -445,11 +474,11 @@ def get_package(name=None,
         "package_uid": guid,
     }
     try:
-        return api_request(url=url,
-                           http_method="GET",
-                           params=params,
-                           project_id=project_id,
-                           auth_token=auth_token)
+        return _api_request(url=url,
+                            http_method="GET",
+                            params=params,
+                            project_id=project_id,
+                            auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -496,11 +525,11 @@ def delete_package(name=None,
         "package_uid": guid,
     }
     try:
-        api_request(url=url,
-                    http_method="DELETE",
-                    params=data,
-                    project_id=project_id,
-                    auth_token=auth_token)
+        _api_request(url=url,
+                     http_method="DELETE",
+                     params=data,
+                     project_id=project_id,
+                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -543,11 +572,11 @@ def create_package(source=None,
 
     url = CATALOG_HOST + "/serviceclass/add"
     try:
-        return api_request(url=url,
-                           http_method="POST",
-                           data=manifest,
-                           project_id=project_id,
-                           auth_token=auth_token)
+        return _api_request(url=url,
+                            http_method="POST",
+                            data=manifest,
+                            project_id=project_id,
+                            auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -566,10 +595,10 @@ def get_networks(project_id=None,
     """
     url = CATALOG_HOST + "/routednetwork"
     try:
-        response_body = api_request(url=url,
-                                    http_method="GET",
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="GET",
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -614,10 +643,10 @@ def get_network(name=None,
 
     url = CATALOG_HOST + "/routednetwork/%s" % guid
     try:
-        return api_request(url=url,
-                           http_method="GET",
-                           project_id=project_id,
-                           auth_token=auth_token)
+        return _api_request(url=url,
+                            http_method="GET",
+                            project_id=project_id,
+                            auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -641,11 +670,11 @@ def create_network(name,
         "parameters": parameters or {},
     }
     try:
-        return api_request(url=url,
-                           http_method="POST",
-                           data=data,
-                           project_id=project_id,
-                           auth_token=auth_token)
+        return _api_request(url=url,
+                            http_method="POST",
+                            data=data,
+                            project_id=project_id,
+                            auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -674,10 +703,10 @@ def delete_network(name=None,
 
     url = CATALOG_HOST + "/routednetwork/%s" % guid
     try:
-        api_request(url=url,
-                    http_method="DELETE",
-                    project_id=project_id,
-                    auth_token=auth_token)
+        _api_request(url=url,
+                     http_method="DELETE",
+                     project_id=project_id,
+                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -702,12 +731,12 @@ def get_deployments(package_uid=None,
         'package_uid': package_uid or '',
         'phase': phase,
     }
-    url = CATALOG_HOST + "/deployment/list?%s" % urlencode(params, doseq=True)
+    url = CATALOG_HOST + "/deployment/list?%s" % _urlencode(params, doseq=True)
     try:
-        return api_request(url=url,
-                           http_method="GET",
-                           project_id=project_id,
-                           auth_token=auth_token)
+        return _api_request(url=url,
+                            http_method="GET",
+                            project_id=project_id,
+                            auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -733,10 +762,10 @@ def get_deployment(name=None,
 
     url = CATALOG_HOST + "/serviceinstance/%s" % id
     try:
-        return api_request(url=url,
-                           http_method="GET",
-                           project_id=project_id,
-                           auth_token=auth_token)
+        return _api_request(url=url,
+                            http_method="GET",
+                            project_id=project_id,
+                            auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -844,11 +873,11 @@ def create_deployment(name,
     #
     url = PROVISION_API_PATH + "/instanceId"
     try:
-        response_body = api_request(url=url,
-                                    http_method="PUT",
-                                    data=provision_configuration,
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="PUT",
+                                     data=provision_configuration,
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -897,11 +926,11 @@ def delete_deployment(name=None,
     }
     url = CATALOG_HOST + "/v2/service_instances/%s" % deployment['deploymentId']
     try:
-        api_request(url=url,
-                    http_method="DELETE",
-                    params=params,
-                    project_id=project_id,
-                    auth_token=auth_token)
+        _api_request(url=url,
+                     http_method="DELETE",
+                     params=params,
+                     project_id=project_id,
+                     auth_token=auth_token)
         return True
     except CommandExecutionError as e:
         log.exception(e)
@@ -916,10 +945,10 @@ def get_dependencies(deployment_id,
     """
     url = CATALOG_HOST + "/serviceinstance/%s/dependencies" % deployment_id
     try:
-        return api_request(url=url,
-                           http_method="GET",
-                           project_id=project_id,
-                           auth_token=auth_token)
+        return _api_request(url=url,
+                            http_method="GET",
+                            project_id=project_id,
+                            auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -969,10 +998,10 @@ def get_devices(tgt=None,
     """
     url = DEVICE_API_PATH
     try:
-        response_body = api_request(url=url,
-                                    http_method="GET",
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="GET",
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -983,7 +1012,7 @@ def get_devices(tgt=None,
             device
             for device
             in response_body['response']['data']
-            if __utils__['rapyutaio.match'](tgt, device)
+            if match(tgt, device)
         ]
     else:
         # return all devices
@@ -1014,10 +1043,10 @@ def get_device(name=None,
 
     url = DEVICE_API_PATH + device_id
     try:
-        response_body = api_request(url=url,
-                                    http_method="GET",
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="GET",
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -1058,7 +1087,7 @@ def cmd(tgt,
         device['uuid']: device['name']
         for device
         in all_devices
-        if __utils__['rapyutaio.match'](tgt, device)
+        if match(tgt, device)
         and device['status'] == "ONLINE"
     }
 
@@ -1081,11 +1110,11 @@ def cmd(tgt,
 
         url = DEVICE_COMMAND_API_PATH
         try:
-            response_body = api_request(url=url,
-                                        http_method="POST",
-                                        data=command,
-                                        project_id=project_id,
-                                        auth_token=auth_token)
+            response_body = _api_request(url=url,
+                                         http_method="POST",
+                                         data=command,
+                                         project_id=project_id,
+                                         auth_token=auth_token)
         except CommandExecutionError as e:
             log.exception(e)
             return False
@@ -1126,10 +1155,10 @@ def get_metrics(name=None,
 
     url = DEVICE_METRIC_API_PATH + device_id
     try:
-        response_body = api_request(url=url,
-                                    http_method="GET",
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="GET",
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -1179,11 +1208,11 @@ def add_metrics(name=None,
         }
     }
     try:
-        api_request(url=url,
-                    http_method="POST",
-                    data=data,
-                    project_id=project_id,
-                    auth_token=auth_token)
+        _api_request(url=url,
+                     http_method="POST",
+                     data=data,
+                     project_id=project_id,
+                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -1219,10 +1248,10 @@ def get_topics(name=None,
 
     url = DEVICE_METRIC_API_PATH + device_id
     try:
-        response_body = api_request(url=url,
-                                    http_method="GET",
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="GET",
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return None
@@ -1242,11 +1271,11 @@ def _label_add(device_id, name, value, project_id, auth_token):
         name: value,
     }
     try:
-        response_body = api_request(url=url,
-                                    http_method="POST",
-                                    data=data,
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="POST",
+                                     data=data,
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -1262,11 +1291,11 @@ def _label_update(label_id, name, value, project_id, auth_token):
         "value": value,
     }
     try:
-        response_body = api_request(url=url,
-                                    http_method="PUT",
-                                    data=data,
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="PUT",
+                                     data=data,
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -1278,10 +1307,10 @@ def _label_update(label_id, name, value, project_id, auth_token):
 def _label_delete(label_id, project_id, auth_token):
     url = DEVICE_LABEL_API_PATH + str(label_id)
     try:
-        response_body = api_request(url=url,
-                                    http_method="DELETE",
-                                    project_id=project_id,
-                                    auth_token=auth_token)
+        response_body = _api_request(url=url,
+                                     http_method="DELETE",
+                                     project_id=project_id,
+                                     auth_token=auth_token)
     except CommandExecutionError as e:
         log.exception(e)
         return False
@@ -1338,14 +1367,7 @@ def test(project_id=None, auth_token=None):
     """
     Just for testing
     """
-    return api_request(url=DEVICE_API_PATH,
-                       http_method="GET",
-                       project_id=project_id,
-                       auth_token=auth_token)
-
-
-
-def merge(obj_a, obj_b):
-    copied = copy.deepcopy(obj_a)
-    return __utils__['rapyutaio.deep_merge'](copied, obj_b)
-
+    return _api_request(url=DEVICE_API_PATH,
+                        http_method="GET",
+                        project_id=project_id,
+                        auth_token=auth_token)
