@@ -75,28 +75,18 @@ def _error(ret, err_msg):
 
 
 
-def _get_config(project_id, auth_token):
-    """
-    If there is no project_id or auth token provided, this
-    will attempt to fetch it from the Salt configuration
-    """
-    if not project_id and __salt__['config.get']("rapyutaio:project_id"):
-        project_id = __salt__['config.get']("rapyutaio:project_id")
-
-    if not auth_token and __salt__['config.get']("rapyutaio:auth_token"):
-        auth_token = __salt__['config.get']("rapyutaio:auth_token")
-
-    return (project_id, auth_token)
-
-
-
 def _get_credentials():
     config = __salt__['config.get']('rapyutaio')
     return (config['username'], config['password'])
 
 
 
-def get_auth_token(username, password):
+def _cache_token(token_data):
+    return __salt__['sdb.set']("sdb://rapyutaio/auth_token", token_data)
+
+
+
+def _request_auth_token(username, password):
     """
     Use the username (email) and password to authenticate to rapyuta.io and
     generate a new JWT auth token.
@@ -131,22 +121,97 @@ def get_auth_token(username, password):
     response_body = salt.utils.json.loads(response['body'])
     response_data = response_body['data']
 
-    salt.utils.sdb.sdb_set("sdb://rapyutaio/auth_token", response_data, __opts__, None)
-
     return response_data
 
 
 
-def _renew_token():
+def request_auth_token(username=None, password=None):
     """
-    Login to rapyuta.io using credentials in the minion config
+    Login to rapyuta.io using credentials provided, or
+    credentials in the minion config,
+    and return a new auth token
 
     rapyutaio:
       username: "first.last@email.com"
       password: "mypassword"
     """
-    username, password = _get_credentials()
-    return get_auth_token(username, password)
+    # TODO: allow multiple credential profiles and a way to select one
+    if username is None or password is None:
+        try:
+            username, password = _get_credentials()
+        except KeyError as e:
+            log.exception(e)
+            return None
+
+    new_token = _request_auth_token(username, password)
+
+    return new_token['token']
+
+
+
+def _get_cached_token():
+    """
+    Returns None if:
+    - sdb is not configured
+    - no token has been cached
+    - cached token has expired
+
+    Otherwise returns the token
+    """
+    log.trace('_get_cached_token')
+
+    # Get the cached token with its expiryAt
+    try:
+        cached_token = __salt__['sdb.get']('sdb://rapyutaio/auth_token', strict=True)
+        log.debug(f"cached_token: {cached_token!s}")
+    except SaltInvocationError:
+        return None
+
+    if cached_token is None:
+        return None
+
+    # Trim off the nanoseconds when parsing the datetime
+    expiry = datetime.strptime(cached_token['expiryAt'][:19], '%Y-%m-%dT%H:%M:%S')
+
+    if expiry >= datetime.utcnow():
+        # Token is still valid
+        return cached_token.get('token', None)
+
+    return None
+
+
+
+def _get_new_auth_token(username=None, password=None):
+    """
+    Requests and caches a new auth token
+    """
+    if username is None or password is None:
+        username, password = _get_credentials()
+
+    new_token_data = _request_auth_token(username, password)
+
+    # Send the full response to be cached
+    _cache_token(new_token_data)
+
+    return new_token_data['token']
+
+
+
+def _get_auth_token():
+    """
+    Returns cached auth token or requets a new token
+    """
+    auth_token = __salt__['config.get']("rapyutaio:auth_token", None)
+
+    if auth_token is not None:
+        return auth_token
+
+    cached_token = _get_cached_token()
+    if cached_token is not None:
+        return cached_token
+
+    # Request a new token
+    return _get_new_auth_token()
 
 
 
@@ -199,65 +264,46 @@ def _send_request(url, header_dict={}, method="GET", data=None, params=None):
 
 
 def _api_request(url,
-                http_method="GET",
-                header_dict={},
-                data=None,
-                params=None,
-                project_id=None,
-                auth_token=None):
+                 http_method="GET",
+                 header_dict={},
+                 data=None,
+                 params=None,
+                 project_id=None,
+                 auth_token=None):
     """
     Wrapper for HTTP requests to IO and handle authentication and tokens
     """
     log.debug("rapyutaio._api_request() called...")
-    project_id = project_id or __salt__['config.get']("rapyutaio:project_id")
+
+    if project_id is None:
+        project_id = __salt__['config.get']("rapyutaio:project_id")
 
     if not project_id:
         raise InvalidConfigError("No rapyutaio project_id found")
 
-    generated_auth_token = None
-
     if auth_token is None:
-        # Get the cached token with its expiryAt
-        cached_token = salt.utils.sdb.sdb_get('sdb://rapyutaio/auth_token', __opts__, None)
+        auth_token = _get_auth_token()
 
-        log.debug("cached_token: {}".format(str(cached_token)))
+    # header_dict = _header_dict(project_id, auth_token or generated_auth_token)
+    header_dict = _header_dict(project_id, auth_token)
 
-        if cached_token:
-            try:
-                # Trim off the nanoseconds when parsing the datetime
-                expiry = datetime.strptime(cached_token['expiryAt'][:19], '%Y-%m-%dT%H:%M:%S')
-
-                if expiry >= datetime.utcnow():
-                    generated_auth_token = cached_token['token']
-            except KeyError:
-                pass
-
-    if auth_token is None and generated_auth_token is None:
-        # cached token has expired
-        generated_auth_token = _renew_token()['token']
-
-    header_dict = _header_dict(project_id, auth_token or generated_auth_token)
-
-    # first request attempt
-    try:
+    def _send_api_request():
         return _send_request(url=url,
                              header_dict=header_dict,
                              method=http_method,
                              data=data,
                              params=params)
+
+
+    # first request attempt
+    try:
+        return _send_api_request()
     except CommandExecutionError as e:
         if e.info['status'] == 401:
             # HTTP 401: Unauthorized
-            if auth_token is None:
-                # only generate a new token if the first was
-                # generated from a login
-                generated_auth_token = _renew_token()['token']
-                header_dict = _header_dict(project_id, generated_auth_token)
-                return _send_request(url=url,
-                                     header_dict=header_dict,
-                                     method=http_method,
-                                     data=data,
-                                     params=params)
+            new_auth_token = _renew_token()['token']
+            header_dict = _header_dict(project_id, new_auth_token)
+            return _send_api_request()
         raise e
 
 
@@ -489,9 +535,13 @@ def delete_package(name=None,
                    version=None,
                    guid=None,
                    project_id=None,
-                   auth_token=None):
+                   auth_token=None,
+                   force=False):
     """
     Delete a package
+
+    Force:
+        Delete the package even if it's still in use
 
     Return:
         True: file deleted
@@ -1367,7 +1417,9 @@ def test(project_id=None, auth_token=None):
     """
     Just for testing
     """
-    return _api_request(url=DEVICE_API_PATH,
-                        http_method="GET",
-                        project_id=project_id,
-                        auth_token=auth_token)
+    # return _get_cached_token()
+    return _get_auth_token()
+    # return _api_request(url=DEVICE_API_PATH,
+    #                     http_method="GET",
+    #                     project_id=project_id,
+    #                     auth_token=auth_token)
